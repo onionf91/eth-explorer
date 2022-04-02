@@ -2,23 +2,47 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"log"
 	"math/big"
 	"os"
 )
 
-type ExplorerService struct {
-	client *ethclient.Client
+type BlockHeader struct {
+	BlockNumber uint64 `json:"block_number"`
+	BlockHash   string `json:"block_hash"`
+	BlockTime   uint64 `json:"block_time"`
+	ParentHash  string `json:"parent_hash"`
+}
+
+type Block struct {
+	BlockHeader
+	TxHashList []string `json:"transactions"`
 }
 
 type Transaction struct {
-	raw     *types.Transaction
-	msg     *types.Message
-	receipt *types.Receipt
+	Hash    string      `json:"tx_hash"`
+	From    string      `json:"from"`
+	To      string      `json:"to"`
+	Nonce   uint64      `json:"nonce"`
+	Data    string      `json:"data"`
+	Value   string      `json:"value"`
+	LogList []*EventLog `json:"logs"`
+}
+
+type EventLog struct {
+	Index uint   `json:"index"`
+	Data  string `json:"data"`
+}
+
+type ExplorerService struct {
+	client *ethclient.Client
+	rdb    *redis.Client
 }
 
 func NewExplorerService() *ExplorerService {
@@ -26,7 +50,15 @@ func NewExplorerService() *ExplorerService {
 	if err != nil {
 		log.Fatal(err)
 	}
-	exp := &ExplorerService{client: client}
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     os.Getenv("ETH_EXPLORER_REDIS_ENDPOINT"),
+		Password: os.Getenv("ETH_EXPLORER_REDIS_PASSWORD"),
+		DB:       0, // use default DB
+	})
+	exp := &ExplorerService{
+		client: client,
+		rdb:    rdb,
+	}
 	return exp
 }
 
@@ -47,24 +79,19 @@ func (exp *ExplorerService) GetBlockListHandler() gin.HandlerFunc {
 			})
 			return
 		}
-		blockList := make([]interface{}, limit.Int64())
+		headerList := make([]*BlockHeader, 0)
 		for index := big.NewInt(0); index.Cmp(limit) < 0; index.Add(index, big.NewInt(1)) {
 			header := exp.queryBlockHeaderByNumber(blockNumber)
-			blockNumber.Sub(blockNumber, big.NewInt(1))
 			if header == nil {
 				c.JSON(500, gin.H{
 					"reason": "query block header failed",
 				})
 				return
 			}
-			blockList[index.Int64()] = gin.H{
-				"block_number": header.Number.Uint64(),
-				"block_hash":   header.Hash().String(),
-				"block_time":   header.Time,
-				"parent_hash":  header.ParentHash.String(),
-			}
+			headerList = append(headerList, header)
+			blockNumber.Sub(blockNumber, big.NewInt(1))
 		}
-		c.JSON(200, blockList)
+		c.JSON(200, headerList)
 	}
 }
 
@@ -85,19 +112,7 @@ func (exp *ExplorerService) GetBlockByIdHandler() gin.HandlerFunc {
 			})
 			return
 		}
-		header := block.Header()
-		block.Transactions().Len()
-		txHashList := make([]interface{}, block.Transactions().Len())
-		for index := 0; index < block.Transactions().Len(); index++ {
-			txHashList[index] = block.Transactions()[index].Hash()
-		}
-		c.JSON(200, gin.H{
-			"block_number": header.Number.Uint64(),
-			"block_hash":   header.Hash().String(),
-			"block_time":   header.Time,
-			"parent_hash":  header.ParentHash.String(),
-			"transactions": txHashList,
-		})
+		c.JSON(200, block)
 	}
 }
 
@@ -110,23 +125,35 @@ func (exp *ExplorerService) GetTransactionByTxHashHandler() gin.HandlerFunc {
 			})
 			return
 		}
-		logList := make([]interface{}, len(tx.receipt.Logs))
-		for index := 0; index < len(tx.receipt.Logs); index++ {
-			logList[index] = gin.H{
-				"index": tx.receipt.Logs[0].Index,
-				"data":  common.BytesToHash(tx.receipt.Logs[0].Data),
-			}
-		}
-		c.JSON(200, gin.H{
-			"tx_hash": tx.raw.Hash().String(),
-			"from":    tx.msg.From().String(),
-			"to":      tx.msg.To().String(),
-			"nonce":   tx.raw.Nonce(),
-			"data":    common.BytesToHash(tx.raw.Data()),
-			"value":   tx.raw.Value().String(),
-			"logs":    logList,
-		})
+		c.JSON(200, tx)
 	}
+}
+
+func (exp *ExplorerService) queryDataFromCache(key string, dist any) bool {
+	val, err := exp.rdb.Get(context.Background(), key).Result()
+	if err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(val), dist); err != nil {
+		log.Println("unmarshal json to struc failed", err)
+		return false
+	}
+	log.Println("query data from redis")
+	return true
+}
+
+func (exp *ExplorerService) cacheData(key string, data any) bool {
+	val, err := json.Marshal(data)
+	if err != nil {
+		log.Println("marshal struc to json failed", err)
+		return false
+	}
+	if err := exp.rdb.Set(context.Background(), key, val, 0).Err(); err != nil {
+		log.Println("cache data to redis failed", err)
+		return false
+	}
+	// log.Println("cache data to redis")
+	return true
 }
 
 func (exp *ExplorerService) queryLatestBlockNumber() *big.Int {
@@ -138,25 +165,55 @@ func (exp *ExplorerService) queryLatestBlockNumber() *big.Int {
 	return new(big.Int).SetUint64(blockNumber)
 }
 
-func (exp *ExplorerService) queryBlockHeaderByNumber(number *big.Int) *types.Header {
+func (exp *ExplorerService) queryBlockHeaderByNumber(number *big.Int) *BlockHeader {
+	key := "header_" + number.String()
+	entity := &BlockHeader{}
+	if suc := exp.queryDataFromCache(key, entity); suc {
+		return entity
+	}
 	header, err := exp.client.HeaderByNumber(context.Background(), number)
 	if err != nil {
 		log.Println("query block header failed", err)
 		return nil
 	}
-	return header
+	entity.BlockNumber = header.Number.Uint64()
+	entity.BlockHash = header.Hash().String()
+	entity.BlockTime = header.Time
+	entity.ParentHash = header.ParentHash.String()
+	exp.cacheData(key, entity)
+	return entity
 }
 
-func (exp *ExplorerService) queryBlockByNumber(number *big.Int) *types.Block {
+func (exp *ExplorerService) queryBlockByNumber(number *big.Int) *Block {
+	key := "block_" + number.String()
+	entity := &Block{}
+	if suc := exp.queryDataFromCache(key, entity); suc {
+		return entity
+	}
 	block, err := exp.client.BlockByNumber(context.Background(), number)
 	if err != nil {
 		log.Println("query block failed", err)
 		return nil
 	}
-	return block
+	txHashList := make([]string, 0)
+	for _, tx := range block.Transactions() {
+		txHashList = append(txHashList, tx.Hash().String())
+	}
+	entity.BlockNumber = block.Header().Number.Uint64()
+	entity.BlockHash = block.Header().Hash().String()
+	entity.BlockTime = block.Header().Time
+	entity.ParentHash = block.Header().ParentHash.String()
+	entity.TxHashList = txHashList
+	exp.cacheData(key, entity)
+	return entity
 }
 
 func (exp *ExplorerService) queryTransactionByHash(hash common.Hash) *Transaction {
+	key := "tx_" + hash.String()
+	entity := &Transaction{}
+	if suc := exp.queryDataFromCache(key, entity); suc {
+		return entity
+	}
 	tx, _, err := exp.client.TransactionByHash(context.Background(), hash)
 	if err != nil {
 		log.Println("query transaction failed", err)
@@ -176,9 +233,24 @@ func (exp *ExplorerService) queryTransactionByHash(hash common.Hash) *Transactio
 		log.Println("unpack message from transaction failed", err)
 		return nil
 	}
-	return &Transaction{
-		raw:     tx,
-		msg:     &msg,
-		receipt: receipt,
+	to := ""
+	if msg.To() != nil {
+		to = msg.To().String()
 	}
+	logList := make([]*EventLog, 0)
+	for _, eLog := range receipt.Logs {
+		logList = append(logList, &EventLog{
+			Index: eLog.Index,
+			Data:  common.BytesToHash(eLog.Data).String(),
+		})
+	}
+	entity.Hash = tx.Hash().String()
+	entity.From = msg.From().String()
+	entity.To = to
+	entity.Nonce = tx.Nonce()
+	entity.Data = common.BytesToHash(tx.Data()).String()
+	entity.Value = tx.Value().String()
+	entity.LogList = logList
+	exp.cacheData(key, entity)
+	return entity
 }

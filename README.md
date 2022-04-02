@@ -4,6 +4,8 @@
 
 ```bash
 export ETH_EXPLORER_RPC_ENDPOINT=https://...
+export ETH_EXPLORER_REDIS_ENDPOINT=localhost:6379
+export ETH_EXPLORER_REDIS_PASSWORD=
 ```
 
 ## API Service
@@ -115,4 +117,5 @@ TBD...
 
 ## Enhancement
 
-TBD...
+1. How to reduce invocation of RPC?
+   * Using `Redis` to cached queried data.
