@@ -5,20 +5,36 @@ import (
 )
 
 type ExplorerService struct {
-	counter int
 }
 
 func NewExplorerService() *ExplorerService {
-	exp := &ExplorerService{counter: 0}
+	exp := &ExplorerService{}
 	return exp
 }
 
-func (exp *ExplorerService) PingHandler() gin.HandlerFunc {
+func (exp *ExplorerService) GetBlockListHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		exp.counter++
+		limit := c.DefaultQuery("limit", "10")
 		c.JSON(200, gin.H{
-			"message": "pong",
-			"count":   exp.counter,
+			"limit": limit,
+		})
+	}
+}
+
+func (exp *ExplorerService) GetBlockByIdHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+		c.JSON(200, gin.H{
+			"id": id,
+		})
+	}
+}
+
+func (exp *ExplorerService) GetTransactionByTxHashHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		txHash := c.Param("txHash")
+		c.JSON(200, gin.H{
+			"tx_hash": txHash,
 		})
 	}
 }

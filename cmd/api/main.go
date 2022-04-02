@@ -10,7 +10,9 @@ func main() {
 	router := gin.Default()
 	explorer := service.NewExplorerService()
 
-	router.GET("/ping", explorer.PingHandler())
+	router.GET("/blocks", explorer.GetBlockListHandler())
+	router.GET("/blocks/:id", explorer.GetBlockByIdHandler())
+	router.GET("/transaction/:txHash", explorer.GetTransactionByTxHashHandler())
 
 	router.Run("localhost:8080")
 }
