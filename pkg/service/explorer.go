@@ -8,37 +8,11 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
+	"github.com/onionf91/eth-explorer/pkg/entity"
 	"log"
 	"math/big"
 	"os"
 )
-
-type BlockHeader struct {
-	BlockNumber uint64 `json:"block_number"`
-	BlockHash   string `json:"block_hash"`
-	BlockTime   uint64 `json:"block_time"`
-	ParentHash  string `json:"parent_hash"`
-}
-
-type Block struct {
-	BlockHeader
-	TxHashList []string `json:"transactions"`
-}
-
-type Transaction struct {
-	Hash    string      `json:"tx_hash"`
-	From    string      `json:"from"`
-	To      string      `json:"to"`
-	Nonce   uint64      `json:"nonce"`
-	Data    string      `json:"data"`
-	Value   string      `json:"value"`
-	LogList []*EventLog `json:"logs"`
-}
-
-type EventLog struct {
-	Index uint   `json:"index"`
-	Data  string `json:"data"`
-}
 
 type ExplorerService struct {
 	client *ethclient.Client
@@ -79,7 +53,7 @@ func (exp *ExplorerService) GetBlockListHandler() gin.HandlerFunc {
 			})
 			return
 		}
-		headerList := make([]*BlockHeader, 0)
+		headerList := make([]*entity.BlockHeader, 0)
 		for index := big.NewInt(0); index.Cmp(limit) < 0; index.Add(index, big.NewInt(1)) {
 			header := exp.queryBlockHeaderByNumber(blockNumber)
 			if header == nil {
@@ -165,30 +139,30 @@ func (exp *ExplorerService) queryLatestBlockNumber() *big.Int {
 	return new(big.Int).SetUint64(blockNumber)
 }
 
-func (exp *ExplorerService) queryBlockHeaderByNumber(number *big.Int) *BlockHeader {
+func (exp *ExplorerService) queryBlockHeaderByNumber(number *big.Int) *entity.BlockHeader {
 	key := "header_" + number.String()
-	entity := &BlockHeader{}
-	if suc := exp.queryDataFromCache(key, entity); suc {
-		return entity
+	headerEntity := &entity.BlockHeader{}
+	if suc := exp.queryDataFromCache(key, headerEntity); suc {
+		return headerEntity
 	}
 	header, err := exp.client.HeaderByNumber(context.Background(), number)
 	if err != nil {
 		log.Println("query block header failed", err)
 		return nil
 	}
-	entity.BlockNumber = header.Number.Uint64()
-	entity.BlockHash = header.Hash().String()
-	entity.BlockTime = header.Time
-	entity.ParentHash = header.ParentHash.String()
-	exp.cacheData(key, entity)
-	return entity
+	headerEntity.BlockNumber = header.Number.Uint64()
+	headerEntity.BlockHash = header.Hash().String()
+	headerEntity.BlockTime = header.Time
+	headerEntity.ParentHash = header.ParentHash.String()
+	exp.cacheData(key, headerEntity)
+	return headerEntity
 }
 
-func (exp *ExplorerService) queryBlockByNumber(number *big.Int) *Block {
+func (exp *ExplorerService) queryBlockByNumber(number *big.Int) *entity.Block {
 	key := "block_" + number.String()
-	entity := &Block{}
-	if suc := exp.queryDataFromCache(key, entity); suc {
-		return entity
+	blockEntity := &entity.Block{}
+	if suc := exp.queryDataFromCache(key, blockEntity); suc {
+		return blockEntity
 	}
 	block, err := exp.client.BlockByNumber(context.Background(), number)
 	if err != nil {
@@ -199,20 +173,20 @@ func (exp *ExplorerService) queryBlockByNumber(number *big.Int) *Block {
 	for _, tx := range block.Transactions() {
 		txHashList = append(txHashList, tx.Hash().String())
 	}
-	entity.BlockNumber = block.Header().Number.Uint64()
-	entity.BlockHash = block.Header().Hash().String()
-	entity.BlockTime = block.Header().Time
-	entity.ParentHash = block.Header().ParentHash.String()
-	entity.TxHashList = txHashList
-	exp.cacheData(key, entity)
-	return entity
+	blockEntity.BlockNumber = block.Header().Number.Uint64()
+	blockEntity.BlockHash = block.Header().Hash().String()
+	blockEntity.BlockTime = block.Header().Time
+	blockEntity.ParentHash = block.Header().ParentHash.String()
+	blockEntity.TxHashList = txHashList
+	exp.cacheData(key, blockEntity)
+	return blockEntity
 }
 
-func (exp *ExplorerService) queryTransactionByHash(hash common.Hash) *Transaction {
+func (exp *ExplorerService) queryTransactionByHash(hash common.Hash) *entity.Transaction {
 	key := "tx_" + hash.String()
-	entity := &Transaction{}
-	if suc := exp.queryDataFromCache(key, entity); suc {
-		return entity
+	transactionEntity := &entity.Transaction{}
+	if suc := exp.queryDataFromCache(key, transactionEntity); suc {
+		return transactionEntity
 	}
 	tx, _, err := exp.client.TransactionByHash(context.Background(), hash)
 	if err != nil {
@@ -237,20 +211,20 @@ func (exp *ExplorerService) queryTransactionByHash(hash common.Hash) *Transactio
 	if msg.To() != nil {
 		to = msg.To().String()
 	}
-	logList := make([]*EventLog, 0)
+	logEntityList := make([]*entity.EventLog, 0)
 	for _, eLog := range receipt.Logs {
-		logList = append(logList, &EventLog{
+		logEntityList = append(logEntityList, &entity.EventLog{
 			Index: eLog.Index,
 			Data:  common.BytesToHash(eLog.Data).String(),
 		})
 	}
-	entity.Hash = tx.Hash().String()
-	entity.From = msg.From().String()
-	entity.To = to
-	entity.Nonce = tx.Nonce()
-	entity.Data = common.BytesToHash(tx.Data()).String()
-	entity.Value = tx.Value().String()
-	entity.LogList = logList
-	exp.cacheData(key, entity)
-	return entity
+	transactionEntity.Hash = tx.Hash().String()
+	transactionEntity.From = msg.From().String()
+	transactionEntity.To = to
+	transactionEntity.Nonce = tx.Nonce()
+	transactionEntity.Data = common.BytesToHash(tx.Data()).String()
+	transactionEntity.Value = tx.Value().String()
+	transactionEntity.LogList = logEntityList
+	exp.cacheData(key, transactionEntity)
+	return transactionEntity
 }
