@@ -9,6 +9,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/onionf91/eth-explorer/pkg/entity"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
 	"log"
 	"math/big"
 	"os"
@@ -17,6 +19,7 @@ import (
 type ExplorerService struct {
 	client *ethclient.Client
 	rdb    *redis.Client
+	gdb    *gorm.DB
 }
 
 func NewExplorerService() *ExplorerService {
@@ -29,9 +32,14 @@ func NewExplorerService() *ExplorerService {
 		Password: os.Getenv("ETH_EXPLORER_REDIS_PASSWORD"),
 		DB:       0, // use default DB
 	})
+	gdb, err := gorm.Open(mysql.Open(os.Getenv("ETH_EXPLORER_MYSQL_DNS")), &gorm.Config{})
+	if err != nil {
+		log.Fatal(err)
+	}
 	exp := &ExplorerService{
 		client: client,
 		rdb:    rdb,
+		gdb:    gdb,
 	}
 	return exp
 }

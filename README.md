@@ -6,6 +6,7 @@
 export ETH_EXPLORER_RPC_ENDPOINT=https://...
 export ETH_EXPLORER_REDIS_ENDPOINT=localhost:6379
 export ETH_EXPLORER_REDIS_PASSWORD=
+export ETH_EXPLORER_MYSQL_DNS=user:pass@tcp(127.0.0.1:3306)/dbname?charset\=utf8mb4&parseTime\=True&loc\=Local
 ```
 
 ## API Service
