@@ -1,7 +1,9 @@
 package model
 
+import "gorm.io/gorm"
+
 type Block struct {
-	Id              uint64 `gorm:"primary_key;auto_increment;not_null"`
+	gorm.Model
 	Difficulty      uint64
 	ExtraData       string
 	GasLimit        uint64
@@ -12,14 +14,15 @@ type Block struct {
 	MixHash         string
 	Nonce           uint64
 	Number          uint64 `gorm:"uniqueIndex"`
-	ParentHash      *Block `gorm:"foreignKey:Hash"`
+	ParentId        *uint
+	Parent          *Block
 	ReceiptsRoot    string
 	Sha3Uncles      string
 	Size            float64
 	StateRoot       string
 	Timestamp       uint64 `gorm:"index"`
-	TotalDifficulty uint64
-	Transactions    []*Transaction `gorm:"foreignKey:Hash"`
+	Transactions    []Transaction
 	TransactionRoot string
-	Uncles          []*Block `gorm:"foreignKey:Hash"`
+	NephewId        *uint
+	Uncles          []Block `gorm:"foreignKey:NephewId"`
 }

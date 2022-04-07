@@ -9,17 +9,25 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/onionf91/eth-explorer/pkg/entity"
+	"github.com/onionf91/eth-explorer/pkg/model"
+	"github.com/reactivex/rxgo/v2"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"log"
 	"math/big"
 	"os"
+	"sync"
 )
 
 type ExplorerService struct {
-	client *ethclient.Client
-	rdb    *redis.Client
-	gdb    *gorm.DB
+	client        *ethclient.Client
+	rdb           *redis.Client
+	gdb           *gorm.DB
+	mutex         sync.Mutex
+	associations  []*entity.BlockAssociation
+	blockOf       map[string]*model.Block
+	transactionOf map[string]*model.Transaction
+	lastBlock     *model.Block
 }
 
 func NewExplorerService() *ExplorerService {
@@ -37,9 +45,12 @@ func NewExplorerService() *ExplorerService {
 		log.Fatal(err)
 	}
 	exp := &ExplorerService{
-		client: client,
-		rdb:    rdb,
-		gdb:    gdb,
+		client:        client,
+		rdb:           rdb,
+		gdb:           gdb,
+		associations:  make([]*entity.BlockAssociation, 0),
+		blockOf:       make(map[string]*model.Block),
+		transactionOf: make(map[string]*model.Transaction),
 	}
 	return exp
 }
@@ -111,6 +122,141 @@ func (exp *ExplorerService) GetTransactionByTxHashHandler() gin.HandlerFunc {
 	}
 }
 
+func (exp *ExplorerService) AutoMigrateSchema() {
+	if err := exp.gdb.AutoMigrate(&model.Block{}, &model.Transaction{}); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func (exp *ExplorerService) ScanBlockFrom(from uint64, parallels int) {
+	to := exp.queryLatestBlockNumber()
+	if from == 0 {
+		log.Printf("latest block number is %v", to.Uint64())
+		log.Println("please execute command with -start=block-number flag to specify which block starting scan from.")
+		return
+	}
+	if from >= to.Uint64() {
+		log.Printf("latest block number is %v", to.Uint64())
+		log.Println("start block number must lower than latest one.")
+		return
+	}
+	if result := exp.gdb.Where("number = ?", to.Uint64()).Find(&model.Block{}); result.RowsAffected != 0 {
+		log.Printf("latest block %v already scanned.", to)
+		return
+	}
+	<-exp.doScanBlockFrom(from, to.Uint64(), parallels).Run()
+	exp.associateBlocksAndTransactions()
+	log.Printf("total %v blocks scanned. persisting...", len(exp.associations))
+	exp.gdb.Create(exp.lastBlock)
+	log.Println("persist done.")
+}
+
+func (exp *ExplorerService) associateBlocksAndTransactions() {
+	for _, association := range exp.associations {
+		target := exp.blockOf[association.BlockHash]
+		if parent, exists := exp.blockOf[association.ParentHash]; exists {
+			target.Parent = parent
+		}
+		for _, uncleHash := range association.UncleHashList {
+			if uncle, exists := exp.blockOf[uncleHash]; exists {
+				target.Uncles = append(target.Uncles, *uncle)
+			}
+		}
+		for _, txHash := range association.TxHashList {
+			if tx, exists := exp.transactionOf[txHash]; exists {
+				target.Transactions = append(target.Transactions, *tx)
+			}
+		}
+	}
+}
+
+func (exp *ExplorerService) doScanBlockFrom(from uint64, to uint64, parallels int) rxgo.Observable {
+	var withPool rxgo.Option
+	if parallels != 0 {
+		withPool = rxgo.WithPool(parallels)
+	} else {
+		withPool = rxgo.WithCPUPool()
+	}
+	return rxgo.Range(0, int(to-from)+1).Map(func(_ context.Context, v interface{}) (interface{}, error) {
+		blockNumber := from + uint64(v.(int))
+		blockModel, blockAssociation := exp.findBockModelByNumber(blockNumber)
+		transactionModeOf := make(map[string]*model.Transaction)
+		if blockAssociation != nil {
+			for _, txHash := range blockAssociation.TxHashList {
+				transactionModeOf[txHash] = exp.findTransactionModelByHash(txHash)
+			}
+		}
+		exp.mutex.Lock()
+		defer exp.mutex.Unlock()
+		for txHash, txModel := range transactionModeOf {
+			exp.transactionOf[txHash] = txModel
+		}
+		exp.blockOf[blockModel.Hash] = blockModel
+		if blockAssociation != nil {
+			exp.associations = append(exp.associations, blockAssociation)
+		}
+		if blockNumber == to {
+			exp.lastBlock = blockModel
+		}
+		return v, nil
+	}, withPool)
+}
+
+func (exp *ExplorerService) findTransactionModelByHash(hash string) *model.Transaction {
+	transactionModel := model.Transaction{}
+	if result := exp.gdb.Where("hash = ?", hash).Find(&transactionModel); result.RowsAffected != 0 {
+		return &transactionModel
+	}
+	// TODO: scan data by grpc ?
+	transactionModel.Hash = hash
+	return &transactionModel
+}
+
+func (exp *ExplorerService) findBockModelByNumber(number uint64) (*model.Block, *entity.BlockAssociation) {
+	blockModel := model.Block{}
+	if result := exp.gdb.Where("number = ?", number).Find(&blockModel).RowsAffected; result != 0 {
+		return &blockModel, nil
+	}
+	log.Printf("scan block : %v", number)
+	block := exp.doQueryBlockByNumber(new(big.Int).SetUint64(number))
+	if block == nil {
+		log.Fatal("query block via grpc failed.")
+	}
+	txHashList := make([]string, 0)
+	for _, tx := range block.Transactions() {
+		txHashList = append(txHashList, tx.Hash().String())
+	}
+	uncleHashList := make([]string, 0)
+	for _, uncle := range block.Uncles() {
+		uncleHashList = append(uncleHashList, uncle.Hash().String())
+	}
+	blockModel.Difficulty = block.Difficulty().Uint64()
+	blockModel.ExtraData = common.BytesToHash(block.Extra()).String()
+	blockModel.GasLimit = block.GasLimit()
+	blockModel.GasUsed = block.GasUsed()
+	blockModel.Hash = block.Hash().String()
+	blockModel.LogsBloom = common.BytesToHash(block.Bloom().Bytes()).String()
+	blockModel.Miner = block.Coinbase().String()
+	blockModel.MixHash = block.MixDigest().String()
+	blockModel.Nonce = block.Nonce()
+	blockModel.Number = number
+	blockModel.ReceiptsRoot = block.ReceiptHash().String()
+	blockModel.Sha3Uncles = block.UncleHash().String()
+	blockModel.Size = float64(block.Size())
+	blockModel.StateRoot = block.Root().String()
+	blockModel.Timestamp = block.Time()
+	return &blockModel, &entity.BlockAssociation{
+		Block: entity.Block{
+			BlockHeader: entity.BlockHeader{
+				BlockHash:  block.Hash().String(),
+				ParentHash: block.ParentHash().String(),
+			},
+			TxHashList: txHashList,
+		},
+		UncleHashList: uncleHashList,
+	}
+}
+
 func (exp *ExplorerService) queryDataFromCache(key string, dist any) bool {
 	val, err := exp.rdb.Get(context.Background(), key).Result()
 	if err != nil {
@@ -172,22 +318,29 @@ func (exp *ExplorerService) queryBlockByNumber(number *big.Int) *entity.Block {
 	if suc := exp.queryDataFromCache(key, blockEntity); suc {
 		return blockEntity
 	}
+	if block := exp.doQueryBlockByNumber(number); block != nil {
+		txHashList := make([]string, 0)
+		for _, tx := range block.Transactions() {
+			txHashList = append(txHashList, tx.Hash().String())
+		}
+		blockEntity.BlockNumber = block.Header().Number.Uint64()
+		blockEntity.BlockHash = block.Header().Hash().String()
+		blockEntity.BlockTime = block.Header().Time
+		blockEntity.ParentHash = block.Header().ParentHash.String()
+		blockEntity.TxHashList = txHashList
+		exp.cacheData(key, blockEntity)
+		return blockEntity
+	}
+	return nil
+}
+
+func (exp *ExplorerService) doQueryBlockByNumber(number *big.Int) *types.Block {
 	block, err := exp.client.BlockByNumber(context.Background(), number)
 	if err != nil {
 		log.Println("query block failed", err)
 		return nil
 	}
-	txHashList := make([]string, 0)
-	for _, tx := range block.Transactions() {
-		txHashList = append(txHashList, tx.Hash().String())
-	}
-	blockEntity.BlockNumber = block.Header().Number.Uint64()
-	blockEntity.BlockHash = block.Header().Hash().String()
-	blockEntity.BlockTime = block.Header().Time
-	blockEntity.ParentHash = block.Header().ParentHash.String()
-	blockEntity.TxHashList = txHashList
-	exp.cacheData(key, blockEntity)
-	return blockEntity
+	return block
 }
 
 func (exp *ExplorerService) queryTransactionByHash(hash common.Hash) *entity.Transaction {

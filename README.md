@@ -114,7 +114,18 @@ value. The response payload will include event logs.
 
 ## Indexer Service
 
-TBD...
+Execute indexer service:
+
+```bash
+go run cmd/indexer/main.go -start=18240811 -parallels=4 -migrate
+```
+
+* `start` flag indicate to block number that scan process
+starting from
+* `parallels` flag indicate to concurrent processes for
+block scanning. Default value is CPU core number.
+* `migrate` flag indicate to auto migration process for
+database schema. You can just remove it after first run.
 
 ## Enhancement
 

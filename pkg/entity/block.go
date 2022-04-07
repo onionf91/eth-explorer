@@ -11,3 +11,8 @@ type Block struct {
 	BlockHeader
 	TxHashList []string `json:"transactions"`
 }
+
+type BlockAssociation struct {
+	Block
+	UncleHashList []string
+}
