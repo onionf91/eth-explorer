@@ -6,6 +6,7 @@
 export ETH_EXPLORER_RPC_ENDPOINT=https://...
 export ETH_EXPLORER_REDIS_ENDPOINT=localhost:6379
 export ETH_EXPLORER_REDIS_PASSWORD=
+export ETH_EXPLORER_MYSQL_DNS=user:pass@tcp(127.0.0.1:3306)/dbname?charset\=utf8mb4&parseTime\=True&loc\=Local
 ```
 
 ## API Service
@@ -113,7 +114,18 @@ value. The response payload will include event logs.
 
 ## Indexer Service
 
-TBD...
+Execute indexer service:
+
+```bash
+go run cmd/indexer/main.go -start=18240811 -parallels=4 -migrate
+```
+
+* `start` flag indicate to block number that scan process
+starting from
+* `parallels` flag indicate to concurrent processes for
+block scanning. Default value is CPU core number.
+* `migrate` flag indicate to auto migration process for
+database schema. You can just remove it after first run.
 
 ## Enhancement
 
