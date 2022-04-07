@@ -207,7 +207,7 @@ func (exp *ExplorerService) findTransactionModelByHash(hash string) *model.Trans
 	if result := exp.gdb.Where("hash = ?", hash).Find(&transactionModel); result.RowsAffected != 0 {
 		return &transactionModel
 	}
-	// TODO: scan data by grpc ?
+	// TODO: scan data by rpc ?
 	transactionModel.Hash = hash
 	return &transactionModel
 }
